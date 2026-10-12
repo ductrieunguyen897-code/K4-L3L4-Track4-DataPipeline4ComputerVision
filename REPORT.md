@@ -4,10 +4,10 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền: Họ và tên của bạn>` |
+| Họ và tên | Nguyễn Đức Triệu |
 | MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | 2A202602978 |
 | GitHub | ductrieunguyen897-code |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | trip-02689 |
 
 ## Kết quả cuối
 
@@ -160,21 +160,56 @@ Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày gi�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+- **Hiện tượng khi mô phỏng sập (`LAB_FAIL_ONCE=trip-02689`):**
+  - Đúng **1 task** `silver_frames_trip-02689` chuyển màu **đỏ** (FAILED) với log báo lỗi cố ý: `simulated crash while extracting trip-02689`.
+  - Toàn bộ **6 task** phụ thuộc phía sau (`silver_dbt_run`, `silver_dbt_test`, `gold_dbt_run`, `gold_dbt_test`, `export_gold_dataset`, `publish_warehouse`) tự động chuyển sang trạng thái **`upstream_failed`** (màu cam), bảo đảm dữ liệu dở dang không lan truyền tiếp vào hệ thống.
+  - 25 task trích xuất khung hình của 25 trip còn lại vẫn chạy thành công bình thường (màu xanh lá).
+- **Thao tác xử lý và kết quả khôi phục:**
+  - Ta **chỉ cần clear đúng 1 task đỏ** (`silver_frames_trip-02689`) trên giao diện Airflow để Airflow lập lịch chạy lại riêng task đó, không cần chạy lại toàn bộ DAG hay các trip khác.
+  - Sau khi task đỏ chạy lại thành công, Airflow tự động kích hoạt tiếp các task `upstream_failed` và toàn bộ DAG chuyển lại màu xanh hoàn toàn.
+  - **Dữ liệu hoàn toàn KHÔNG bị nhân đôi**: Cơ chế Delta `overwrite` theo partition predicate `trip_id = 'trip-02689'` ghi đè an toàn đúng partition bị lỗi. Bảng `silver.frames` vẫn giữ đúng 1246 khung hình.
+  - **`dataset_version` KHÔNG đổi**: Vẫn giữ nguyên tuyệt đối là **`e36471b76b8f`**.
+- **Bằng chứng:**
+  - Ảnh log task đỏ: `report/screenshots/airflow_crash.png` (thấy rõ lỗi của `trip-02689`).
+  - Ảnh DAG xanh hoàn chỉnh: `report/screenshots/airflow_graph.png`.
+  - Kết quả verify: 27/27 checks passed.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi quy mô mở rộng lên 500 xe mỗi ngày (khoảng hàng chục ngàn trip video và hàng trăm triệu dòng telemetry mỗi ngày):
+1. **Giải mã video tập trung trên 1 node (Single-node FFmpeg decode — Slide 22, 24)**:
+   - *Điểm nghẽn*: FFmpeg chạy tuần tự/giới hạn trong worker container đơn lẻ của Airflow sẽ gây nghẽn nghiêm trọng CPU, Disk I/O và RAM, không thể xử lý kịp lượng video khổng lồ trong ngày.
+   - *Thay thế*: Chuyển sang xử lý phân tán dùng **Ray Worker**, **Kubernetes Pods autoscaling (KEDA)** hoặc cluster **Apache Spark** kết hợp bộ giải mã GPU phần cứng (NVIDIA DALI / NVDEC) để decode video song song quy mô lớn.
+2. **Engine tính toán in-process (Embedded DuckDB & dbt-duckdb — Slide 12, 22)**:
+   - *Điểm nghẽn*: DuckDB là embedded database chạy trên tài nguyên một máy cục bộ (`lakehouse.duckdb`). Khi telemetry lên tới hàng trăm triệu/hàng tỷ dòng, nó sẽ bị tràn bộ nhớ (Out-Of-Memory) và không hỗ trợ ghi đồng thời (concurrency write lock).
+   - *Thay thế*: Chuyển sang engine tính toán phân tán chuyên dụng cho Big Data như **Apache Spark (Databricks) / Trino** hoặc Cloud Data Warehouse như **Snowflake / BigQuery / Databricks Delta Lake**, điều phối bằng **dbt-spark / dbt-databricks**.
+3. **Lưu trữ metadata & Warehouse đơn điểm (Postgres & Local MinIO — Slide 16, 23)**:
+   - *Điểm nghẽn*: Một instance Postgres duy nhất làm warehouse sẽ bị tắc nghẽn write throughput và dung lượng ổ đĩa khi tải hàng chục triệu bản ghi marts mỗi ngày. MinIO cục bộ cũng bị giới hạn dung lượng lưu trữ vật lý của máy chủ.
+   - *Thay thế*: Chuyển MinIO sang Cloud Object Storage không giới hạn băng thông và dung lượng (**AWS S3 / GCS / Azure Blob**); chuyển Postgres warehouse sang Cloud Columnar Warehouse phân tán (**Snowflake, BigQuery, Redshift, ClickHouse**) kết hợp Open Lakehouse format (Delta Lake, Apache Iceberg).
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+```sql
+SELECT 
+    trip_id,
+    drive_id,
+    total_frames,
+    black_frames,
+    blurry_frames,
+    near_duplicate_frames,
+    ROUND(100.0 * (black_frames + blurry_frames + near_duplicate_frames) / NULLIF(total_frames, 0), 2) AS rejected_rate_pct
+FROM marts.mart_trip_summary
+ORDER BY rejected_rate_pct DESC;
+```
+- **Điều câu truy vấn cho biết**: Tính toán tỷ lệ phần trăm khung hình bị loại bỏ (do đen, mờ hoặc trùng lặp) trên tổng số khung hình của từng chuyến đi (trip). Giúp đội vận hành nhận diện chính xác chuyến đi nào có tỷ lệ camera suy giảm chất lượng nhiều nhất (ví dụ các trip kẹt xe dừng đèn đỏ lâu hoặc qua hầm tối) để kịp thời hiệu chuẩn thiết bị hoặc điều chỉnh ngưỡng tiền xử lý.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất**: Khả năng kết hợp giữa kiến trúc Medallion, Delta Lake ACID Time Travel và dbt test hoạt động cực kỳ mượt mà, giúp việc chạy lại hoặc khắc phục sự cố (backfill / rerun) đạt tính idempotent tuyệt đối mà không lo trùng lặp dữ liệu.
+- **Chưa rõ**: Cách thiết lập chiến lược dọn dẹp (VACUUM và compaction/OPTIMIZE) định kỳ trên Delta Lake ở môi trường production lớn mà không làm gián đoạn các streaming/batch job đang đọc snapshot cũ.
+- **Lỗi dữ liệu pipeline chưa bắt được**: Hiện tượng "cháy sáng" (glare/over-exposure khi mặt trời chiếu thẳng vào ống kính lái) hoặc camera bị che khuất một phần (giọt nước mưa, bụi bẩn, lá cây che một góc ống kính). Hiện tại thuật toán mới kiểm tra khung đen và mờ toàn phần, chưa phát hiện được lỗi che khuất cục bộ (occlusion).
