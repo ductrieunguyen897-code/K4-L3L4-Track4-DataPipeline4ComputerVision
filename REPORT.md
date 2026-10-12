@@ -79,18 +79,39 @@ Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả th
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+- **Số liệu từ `idempotency.json` (thử nghiệm trên `trip-00003` có 60 khung hình):**
+  - Trước khi chạy lại: 1246 dòng, dấu vân tay `6c7480dfde7e`.
+  - Sau 2 lần chạy lại theo cơ chế của pipeline (Delta overwrite theo partition `trip_id`): vẫn đúng **1246 dòng**, dấu vân tay **`6c7480dfde7e`** (`unchanged: true`, không thay đổi bất kỳ byte nào).
+  - Khi mô phỏng cách ghi sai (`append` liên tiếp): partition có 60 khung hình bị nhân đôi thành **120 dòng** (2x) sau 2 lần chạy, gây trùng lặp dữ liệu nghiêm trọng.
+
+- **Vì sao Delta `overwrite` theo partition an toàn hơn xoá rồi ghi lại:**
+  - **Tính nguyên tử (ACID Atomic Commit)**: Delta Lake ghi các file parquet mới trước, sau đó commit một phiên bản mới vào Delta Log trong một giao dịch nguyên tử (all-or-nothing).
+  - **Khả năng chống chịu lỗi (Crash Resilience & Snapshot Isolation)**: Nếu dùng cơ chế truyền thống "xoá rồi ghi lại" (DELETE rồi INSERT), khi tiến trình bị sập (kill task, đứt mạng, cúp điện) giữa hai thao tác hoặc đang ghi dở, partition sẽ bị mất trắng dữ liệu hoặc rơi vào trạng thái hỏng một phần (partial write). Với Delta overwrite, nếu tác vụ gặp sự cố giữa chừng, transaction bị hủy bỏ và không được commit; các truy vấn của độc giả (readers) vẫn luôn đọc được snapshot toàn vẹn của phiên bản trước đó mà không bị gián đoạn hay mất dữ liệu.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
+- **Khung đen vs Khung tối và cách xử lý:**
+  - *Khung đen (`is_black`)*: Độ sáng trung bình gần như bằng 0 (lỗi che camera, hỏng cảm biến, mất tín hiệu decode). Không chứa bất kỳ thông tin thị giác nào, pipeline **loại bỏ hoàn toàn** khỏi dataset huấn luyện ở tầng Gold (Drive A có 6 khung, Drive B có 4 khung).
+  - *Khung tối (`is_dark` / `dark_kept`)*: Khung hình thiếu sáng nhưng vẫn chứa đặc trưng hình học môi trường (xe chạy qua đường hầm, dưới bóng râm, chập tối). Drive B có tới 61 khung tối. Pipeline **gắn cờ chất lượng nhưng vẫn giữ lại (`dark_kept`)** đưa vào dataset.
+  - *Đồng ý với cách xử lý*: Hoàn toàn đồng ý. Xe tự lái trong thế giới thực phải vận hành được trong cả điều kiện thiếu sáng. Giữ lại khung tối giúp mô hình học cách thích ứng với môi trường ánh sáng yếu; trong khi khung đen là lỗi rác phần cứng, nếu giữ lại sẽ làm giảm độ chính xác mô hình.
+
+- **Bảng số khung trùng theo ngưỡng dHash (khoảng cách bit khác biệt tối đa):**
+
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+- **Lựa chọn ngưỡng và sự phụ thuộc vào tốc độ xe:**
+  - **Chọn ngưỡng 2 (ngưỡng pipeline sử dụng)**:
+    - Ngưỡng 0 (chỉ trùng tuyệt đối): Quá khắt khe, bỏ sót nhiều khung thực tế là trùng (ví dụ Drive A có camera đứng hình 6s và xe chạy chậm tạo ra 149 khung gần như tĩnh nhưng ngưỡng 0 chỉ bắt được 61 khung do nhiễu hạt cảm biến - sensor noise).
+    - Ngưỡng 6 (cho phép khác 6 bit): Quá lỏng, loại tới 363 khung ở A và 244 khung ở B (hơn một nửa tổng số khung), gây nguy cơ loại bỏ nhầm cả các khung xe đang di chuyển thực sự có thay đổi bối cảnh nhẹ.
+    - Ngưỡng 2 là điểm cân bằng tối ưu giữa việc lọc khung đứng hình/chờ đèn đỏ và bảo toàn độ đa dạng của dữ liệu huấn luyện.
+  - **Phụ thuộc vào tốc độ xe**:
+    - Khi xe chạy tốc độ cao (cao tốc): Sự thay đổi giữa các khung hình liên tiếp rất lớn (khoảng cách dHash cao), hầu như không có khung nào bị nhận nhầm là trùng lặp.
+    - Khi xe chạy chậm hoặc dừng chờ (đô thị, kẹt xe): Khung hình liên tiếp có sai khác thị giác rất nhỏ (0–2 bit). Do đó, phân tích trùng lặp dHash hiệu quả nhất khi kết hợp với tín hiệu tốc độ xe từ telemetry (`speed_mps ≈ 0`).
 
 ## Bước 4 · Gold
 
