@@ -37,12 +37,42 @@ Dựa trên kết quả thực thi lệnh `scripts/lab.sh step 1 --reset`, 4 kh�
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+**Cách pipeline đưa hai nguồn về một schema:**
+- **Đơn vị tốc độ**: Nguồn B đo bằng km/h được chuyển đổi sang m/s (`spd_kmh / 3.6`) để đồng nhất với nguồn A.
+- **Kiểu thời gian**: Nguồn B đo bằng epoch ms được đổi sang UTC timestamp (`to_timestamp(timestamp_ms / 1000.0)`).
+- **Độ lệch đồng hồ**: Telemetry nguồn B bị lệch 1.5 giây so với video được tự động trừ đi giá trị `telemetry_clock_offset_ms` (1500 ms) khai báo trong `sources.json`.
+- **Bằng chứng đã đúng**: Thời điểm bắt đầu của telemetry B sau hiệu chỉnh là `2025-10-08 14:30:00.009000+00:00`, khớp chính xác với thời điểm bắt đầu của video B (`2025-10-08 14:30:00`). Tốc độ tối đa hợp lý: Drive A đạt 71.0 km/h, Drive B đạt 100.0 km/h (đều ≤ 130 km/h).
+
+**Bảng quarantine (dòng bị cách ly theo lý do):**
+```
+drive_id  reject_reason       so_dong
+--------  ------------------  -------
+drive_a   duplicate           20     
+drive_a   speed_missing       30     
+drive_a   speed_out_of_range  3      
+drive_b   duplicate           20     
+drive_b   speed_missing       30     
+drive_b   speed_out_of_range  3      
+```
+Tổng cộng có 106 dòng bị cách ly (53 dòng mỗi drive). Dữ liệu được bảo toàn tuyệt đối:
+- Drive A: 2968 dòng sạch + 53 dòng cách ly = 3021 dòng raw.
+- Drive B: 3181 dòng sạch + 53 dòng cách ly = 3234 dòng raw.
+
+**Vì sao dòng lỗi vào `rejects` thay vì bị xoá:**
+Tránh tình trạng mất dữ liệu im lặng (silent data loss). Việc lưu vào bảng `silver.silver_telemetry_rejects` kèm cột `reject_reason` giúp đội ngũ kỹ sư giám sát được tỉ lệ suy giảm chất lượng dữ liệu (data quality SLA), biết được cảm biến nào đang lỗi để bảo trì, và có thể audit hoặc replay/sửa lại dữ liệu khi cần thiết mà không phá hủy thông tin gốc.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+- **Vì sao `max_gap_ms` là `warn` còn `in_range` là `error`**:
+  - `max_gap_ms` (khoảng cách giữa các mẫu telemetry > 1000 ms) đặt mức `warn` vì trong thực tế xe di chuyển ngoài môi trường thực, hiện tượng cảm biến rớt tín hiệu tạm thời (dropout) là khiếm khuyết được chấp nhận (tolerated defect); chỉ báo để theo dõi chứ không được dừng cả pipeline sản xuất.
+  - `in_range` (tốc độ trong khoảng 0..70 m/s, tức tối đa 252 km/h) đặt mức `error` vì đây là điều kiện vật lý bắt buộc của xe; nếu tốc độ âm hoặc vượt quá 252 km/h thì đó là dữ liệu rác/hư hại nặng (corrupt data). Dữ liệu này nếu lọt vào Gold sẽ phá hỏng mô hình thị giác/tự lái (downstream ML), do đó bắt buộc phải dừng pipeline để bảo vệ chất lượng dữ liệu.
+
+- **Kết quả thí nghiệm `break-gate` (`break_gate.json`)**:
+  - Khi nới luật làm sạch từ 70 lên 1000 m/s, cổng chất lượng phát hiện lỗi ngay: test `in_range_silver_telemetry_speed_mps__70__0` bị **FAIL** và bắt được đúng **6 dòng** vi phạm (mỗi drive 3 dòng).
+  - Tổng kết test dbt chuyển thành: `PASS=5 WARN=1 ERROR=1 SKIP=0`. Khi có `ERROR=1`, toàn bộ các task xử lý sau trong Airflow DAG sẽ bị chặn lại (`upstream_failed`).
+  - Sau khi khôi phục luật chuẩn: test trở lại trạng thái `PASS=6 WARN=1 ERROR=0 SKIP=0`.
+  - **Ý nghĩa của Cổng chất lượng (Quality Gate)**: Đóng vai trò như một "chốt chặn an toàn" độc lập giữa các tầng dữ liệu. Ngay cả khi code biến đổi dữ liệu (ETL/cleaning logic) bị thay đổi ngoài ý muốn hoặc bị nới lỏng lỗi thời, Quality Gate vẫn chặn đứng dữ liệu bẩn trước khi nó kịp lọt vào tầng Gold và Warehouse.
 
 ## Bước 3 · Silver frames
 
