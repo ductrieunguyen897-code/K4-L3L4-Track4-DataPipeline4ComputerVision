@@ -1,6 +1,6 @@
 FROM apache/airflow:2.10.5-python3.11
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing -o Acquire::Retries=5 ffmpeg curl && rm -rf /var/lib/apt/lists/*
 USER airflow
 # Lab code (deltalake, DuckDB, dbt) lives in its own venv: no clashes with Airflow's dependency pins.
 COPY docker/requirements-lab.txt /tmp/requirements-lab.txt
